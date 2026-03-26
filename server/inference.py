@@ -100,6 +100,34 @@ class InferenceEngine:
         mx.eval(model.parameters())
         self._models[model_name] = (model, tokenizer)
 
+    def _raw_stream_generate(
+        self,
+        model_name: str,
+        prompt: str,
+        max_tokens: int = 512,
+        temperature: float = 0.7,
+    ) -> Generator[Any, None, None]:
+        """Yield raw GenerationResponse objects from mlx-lm.
+
+        Exposes logprobs, token IDs, and generation stats for use by the
+        confidence cascade and other experiment hooks that need per-token
+        metadata beyond just text.
+        """
+        from mlx_lm import stream_generate
+        from mlx_lm.sample_utils import make_sampler
+
+        self._ensure_loaded(model_name)
+        model, tokenizer = self._models[model_name]
+        sampler = make_sampler(temp=temperature)
+
+        yield from stream_generate(
+            model,
+            tokenizer,
+            prompt=prompt,
+            max_tokens=max_tokens,
+            sampler=sampler,
+        )
+
     def generate(
         self,
         prompt: str,
