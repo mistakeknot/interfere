@@ -105,6 +105,8 @@ class BenchmarkSummary:
     thermal_start: str
     thermal_end: str
     kv_bits: int | None = None
+    draft_model: str | None = None
+    num_draft_tokens: int | None = None
     results: list[BenchmarkResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -132,6 +134,8 @@ def run_benchmark(
     warm_up: bool = True,
     kv_bits: int | None = None,
     kv_group_size: int = 64,
+    draft_model: str | None = None,
+    num_draft_tokens: int = 3,
 ) -> BenchmarkSummary:
     """Run the full benchmark corpus against a model.
 
@@ -143,6 +147,8 @@ def run_benchmark(
         warm_up: If True, run a single warm-up generation first.
         kv_bits: If set, quantize the KV cache to this many bits (2, 4, or 8).
         kv_group_size: Group size for KV cache quantization. Default: 64.
+        draft_model: If set, use speculative decoding with this draft model.
+        num_draft_tokens: Number of tokens to draft per step. Default: 3.
 
     Returns:
         BenchmarkSummary with per-prompt results and aggregated stats.
@@ -153,7 +159,7 @@ def run_benchmark(
     engine = InferenceEngine()
     thermal = ThermalMonitor()
 
-    # Warm up: load model into memory
+    # Warm up: load model(s) into memory
     if warm_up:
         list(
             engine.generate(
@@ -162,6 +168,8 @@ def run_benchmark(
                 max_tokens=1,
                 kv_bits=kv_bits,
                 kv_group_size=kv_group_size,
+                draft_model_name=draft_model,
+                num_draft_tokens=num_draft_tokens,
             )
         )
 
@@ -186,6 +194,8 @@ def run_benchmark(
             temperature=temperature,
             kv_bits=kv_bits,
             kv_group_size=kv_group_size,
+            draft_model_name=draft_model,
+            num_draft_tokens=num_draft_tokens,
         ):
             if not tokens:
                 ttft = time.perf_counter() - gen_start
@@ -233,6 +243,8 @@ def run_benchmark(
         thermal_start=thermal_start.level,
         thermal_end=thermal_end.level,
         kv_bits=kv_bits,
+        draft_model=draft_model,
+        num_draft_tokens=num_draft_tokens if draft_model else None,
         results=results,
     )
 
@@ -247,6 +259,11 @@ def print_summary(summary: BenchmarkSummary) -> None:
     print(f"\n{'='*60}")
     print(f"  Benchmark: {summary.model}")
     print(f"{'='*60}")
+    if summary.draft_model:
+        from pathlib import Path
+
+        draft_name = Path(summary.draft_model).name or summary.draft_model
+        print(f"  Draft model:  {draft_name} ({summary.num_draft_tokens} tokens/step)")
     print(kv_label)
     print(f"  Runs:        {summary.total_runs}")
     print(f"  Median tok/s: {summary.median_tok_s}")

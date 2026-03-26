@@ -64,6 +64,18 @@ def main(argv: list[str] | None = None) -> None:
         help="Group size for KV cache quantization (default: 64)",
     )
     parser.add_argument(
+        "--draft-model",
+        type=str,
+        default=None,
+        help="Draft model for speculative decoding (path or HF ID)",
+    )
+    parser.add_argument(
+        "--num-draft-tokens",
+        type=int,
+        default=3,
+        help="Tokens to draft per step in speculative decoding (default: 3)",
+    )
+    parser.add_argument(
         "--save",
         type=str,
         default=None,
@@ -79,6 +91,8 @@ def main(argv: list[str] | None = None) -> None:
         warm_up=not args.no_warmup,
         kv_bits=args.kv_bits,
         kv_group_size=args.kv_group_size,
+        draft_model=args.draft_model,
+        num_draft_tokens=args.num_draft_tokens,
     )
 
     if args.output_json:
@@ -92,7 +106,8 @@ def main(argv: list[str] | None = None) -> None:
         model_slug = Path(args.model).name or args.model.replace("/", "_")
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         kv_suffix = f"-kv{args.kv_bits}" if args.kv_bits else ""
-        filename = f"{timestamp}-{model_slug}{kv_suffix}.json"
+        draft_suffix = f"-spec{args.num_draft_tokens}" if args.draft_model else ""
+        filename = f"{timestamp}-{model_slug}{kv_suffix}{draft_suffix}.json"
         save_path = save_dir / filename
         with open(save_path, "w") as f:
             json.dump(summary.to_dict(), f, indent=2)

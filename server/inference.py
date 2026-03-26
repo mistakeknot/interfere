@@ -137,6 +137,8 @@ class InferenceEngine:
         kv_bits: int | None = None,
         kv_group_size: int = 64,
         max_kv_size: int | None = None,
+        draft_model_name: str | None = None,
+        num_draft_tokens: int = 3,
     ) -> Generator[str, None, None]:
         """Yield decoded text segments for *prompt*.
 
@@ -156,6 +158,11 @@ class InferenceEngine:
             Group size for KV cache quantization. Default: 64.
         max_kv_size:
             Maximum KV cache entries. Enables rotating cache (StreamingLLM).
+        draft_model_name:
+            If set, use speculative decoding with this model as the draft.
+            Must use the same tokenizer as the target model.
+        num_draft_tokens:
+            Number of tokens to draft per step. Default: 3.
 
         Yields
         ------
@@ -183,6 +190,13 @@ class InferenceEngine:
         if max_kv_size is not None:
             gen_kwargs["max_kv_size"] = max_kv_size
 
+        # Speculative decoding: load draft model if requested
+        draft_model_obj = None
+        if draft_model_name is not None:
+            self._ensure_loaded(draft_model_name)
+            draft_model_obj, _ = self._models[draft_model_name]
+            gen_kwargs["num_draft_tokens"] = num_draft_tokens
+
         # Track confidence across generation
         confidences: list[float] = []
         metrics = GenerationMetrics(kv_bits=kv_bits)
@@ -193,6 +207,7 @@ class InferenceEngine:
             prompt=prompt,
             max_tokens=max_tokens,
             sampler=sampler,
+            draft_model=draft_model_obj,
             **gen_kwargs,
         ):
             # --- Experiment hook: early exit confidence tracking ---
