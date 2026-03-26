@@ -1,0 +1,31 @@
+# Default experiment configuration for interfere.
+# Override per-experiment via INTERFERE_EXP_{NAME}_{PARAM} env vars.
+# See server/experiments/config.py for loader details.
+
+experiments:
+  early_exit:
+    enabled: false
+    threshold: 0.95  # softmax confidence threshold for early exit
+
+  reservoir_routing:
+    enabled: false
+    hidden_dim: 4096
+    bottleneck: 64
+    num_models: 4
+    layer: 24        # which transformer layer to tap for hidden states
+
+  confidence_cascade:
+    enabled: false
+    accept_threshold: 0.8
+    escalate_threshold: 0.6
+    cloud_threshold: 0.6
+
+  speculative_decoding:
+    enabled: false
+    draft_model: "local:qwen3.5-9b-4bit"
+    num_draft_tokens: 5   # how many tokens to draft before verification
+
+  kv_quantization:
+    enabled: false
+    key_bits: 8
+    value_bits: 4
