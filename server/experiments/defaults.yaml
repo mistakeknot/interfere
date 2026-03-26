@@ -12,7 +12,9 @@ experiments:
     hidden_dim: 4096
     bottleneck: 64
     num_models: 4
-    layer: 24        # which transformer layer to tap for hidden states
+    layer: 24           # which transformer layer to tap for hidden states
+    activation: relu    # relu, gelu, or silu
+    label_scheme: 4class  # 3class or 4class — must match num_models
 
   confidence_cascade:
     enabled: false
