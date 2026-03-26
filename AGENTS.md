@@ -53,14 +53,17 @@ curl http://localhost:8421/v1/chat/completions \
 ## Clavain Integration
 
 Track B5 in `os/Clavain/config/routing.yaml`:
-- `mode: off` (default) — no local routing
-- `mode: shadow` — log what would route locally
+- `mode: off` — no local routing
+- `mode: shadow` (current) — log what would route locally
 - `mode: enforce` — route eligible tasks to interfere
 
-Complexity-to-model mapping:
-- C1 (trivial) -> local:qwen3-8b
-- C2 (routine) -> local:qwen3-30b
-- C3+ -> confidence cascade (try local, escalate if confidence < 0.6)
+Complexity-to-model mapping (MoE-first, updated 2026-03-26):
+- C1 (trivial) → `local:qwen3.5-9b-4bit` (~5GB, ~60-80 tok/s)
+- C2 (routine) → `local:qwen3.5-35b-a3b-4bit` (~18GB, MoE 3B active, ~40-50 tok/s)
+- C3 (moderate) → `local:nemotron-30b-a3b-8bit` (~32GB, MoE 3B active, with confidence cascade)
+
+MoE models activate only a fraction of parameters per token (e.g., 3B of 35B), giving
+big-model quality at small-model inference speed.
 
 Safety floors: fd-safety and fd-correctness always use cloud models.
 
@@ -91,10 +94,18 @@ uv run pytest tests/ -v
 
 ```
 ~10GB:  macOS + system
-~52GB:  Primary model (72B Q6_K)
-~18GB:  Secondary model (30B Q4_K_M)
-~5GB:   Draft model (8B Q4)
-~43GB:  KV cache pool (Q8K/Q4V)
+~32GB:  Primary model — Nemotron-Cascade-2-30B-A3B 8-bit (MoE, 3B active)
+~18GB:  Secondary model — Qwen3.5-35B-A3B 4-bit (MoE, 3B active)
+~5GB:   Draft model — Qwen3.5-9B-OptiQ 4-bit
+~63GB:  KV cache pool + headroom
+```
+
+Alternative high-end layout (when running gpt-oss-120b):
+```
+~10GB:  macOS + system
+~60GB:  Primary model — gpt-oss-120b MXFP4-Q8
+~5GB:   Draft model — Qwen3.5-9B-OptiQ 4-bit
+~53GB:  KV cache pool + headroom
 ```
 
 ## Dependencies
