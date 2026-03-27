@@ -15,6 +15,7 @@ import enum
 import multiprocessing
 import multiprocessing.queues
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Generator
@@ -166,19 +167,37 @@ def _worker_loop(
 
         if request.command is WorkerCommand.GENERATE:
             model_name = request.payload.get("model_name", "")
+            messages = request.payload.get("messages")
             prompt = request.payload.get("prompt", "")
             max_tokens = request.payload.get("max_tokens", 512)
             temperature = request.payload.get("temperature", 0.7)
 
-            if not model_name or not prompt:
+            if not model_name or (not prompt and not messages):
                 resp_queue.put(
                     WorkerResponse(
                         request_id=request.request_id,
                         status="error",
-                        error="model_name and prompt are required",
+                        error="model_name and (prompt or messages) are required",
                     )
                 )
                 continue
+
+            # Apply chat template if messages provided
+            if messages and not prompt:
+                engine._ensure_loaded(model_name)
+                _, tokenizer = engine._models[model_name]
+                try:
+                    prompt = tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                except Exception:
+                    # Fallback: concatenate messages as plain text
+                    prompt = "\n".join(
+                        f"{m.get('role', 'user')}: {m.get('content', '')}"
+                        for m in messages
+                    )
 
             try:
                 # Stream tokens back as individual responses.
@@ -273,6 +292,11 @@ class MetalWorker:
         self._process: multiprocessing.Process | None = None
         self._req_queue: multiprocessing.Queue | None = None  # type: ignore[type-arg]
         self._resp_queue: multiprocessing.Queue | None = None  # type: ignore[type-arg]
+        # Serialize generate() calls so concurrent HTTP requests don't
+        # interleave token streams on the shared resp_queue. The Metal
+        # subprocess is single-threaded, so this lock simply ensures we
+        # finish reading all tokens from one request before starting the next.
+        self._generate_lock = threading.Lock()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -341,7 +365,8 @@ class MetalWorker:
     def generate(
         self,
         model_name: str,
-        prompt: str,
+        messages: list[dict] | None = None,
+        prompt: str = "",
         max_tokens: int = 512,
         temperature: float = 0.7,
         timeout: float = 60.0,
@@ -352,36 +377,48 @@ class MetalWorker:
         """Stream generated tokens from the Metal subprocess.
 
         Yields decoded text segments. Raises on error or timeout.
+
+        Pass *messages* (list of {role, content} dicts) for chat-template
+        formatting, or *prompt* for raw text. If both are provided, messages
+        takes precedence.
+
+        Concurrent calls are serialized by ``_generate_lock`` so token
+        streams from different HTTP requests cannot interleave on the
+        shared ``resp_queue``.
         """
-        request_id = f"gen-{time.monotonic_ns()}"
-        payload: dict[str, Any] = {
-            "model_name": model_name,
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        if kv_bits is not None:
-            payload["kv_bits"] = kv_bits
-            payload["kv_group_size"] = kv_group_size
-        if max_kv_size is not None:
-            payload["max_kv_size"] = max_kv_size
-        self._send(
-            WorkerRequest(
-                command=WorkerCommand.GENERATE,
-                request_id=request_id,
-                payload=payload,
-            )
-        )
-        while True:
-            resp = self._recv(timeout=timeout)
-            if resp.status == "token":
-                yield resp.data.get("text", "")
-            elif resp.status == "done":
-                return
-            elif resp.status == "error":
-                raise RuntimeError(resp.error or "generation failed")
+        with self._generate_lock:
+            request_id = f"gen-{time.monotonic_ns()}"
+            payload: dict[str, Any] = {
+                "model_name": model_name,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            if messages is not None:
+                payload["messages"] = messages
             else:
-                raise RuntimeError(f"unexpected status: {resp.status}")
+                payload["prompt"] = prompt
+            if kv_bits is not None:
+                payload["kv_bits"] = kv_bits
+                payload["kv_group_size"] = kv_group_size
+            if max_kv_size is not None:
+                payload["max_kv_size"] = max_kv_size
+            self._send(
+                WorkerRequest(
+                    command=WorkerCommand.GENERATE,
+                    request_id=request_id,
+                    payload=payload,
+                )
+            )
+            while True:
+                resp = self._recv(timeout=timeout)
+                if resp.status == "token":
+                    yield resp.data.get("text", "")
+                elif resp.status == "done":
+                    return
+                elif resp.status == "error":
+                    raise RuntimeError(resp.error or "generation failed")
+                else:
+                    raise RuntimeError(f"unexpected status: {resp.status}")
 
     # -- internal transport --------------------------------------------------
 
