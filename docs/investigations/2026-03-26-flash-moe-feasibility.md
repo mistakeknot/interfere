@@ -1,6 +1,6 @@
 # flash-moe Integration Feasibility Study
 
-**Bead:** Demarch-5pa
+**Bead:** Sylveste-5pa
 **Date:** 2026-03-26
 **Status:** Investigation complete — recommend proceeding
 

@@ -76,6 +76,13 @@ def main(argv: list[str] | None = None) -> None:
         help="Tokens to draft per step in speculative decoding (default: 3)",
     )
     parser.add_argument(
+        "--kv-mode",
+        type=str,
+        choices=["standard", "turbo_quant"],
+        default="standard",
+        help="KV cache mode: 'standard' (mlx-lm quantization) or 'turbo_quant' (polar transform)",
+    )
+    parser.add_argument(
         "--save",
         type=str,
         default=None,
@@ -83,6 +90,8 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     args = parser.parse_args(argv)
+
+    kv_mode = args.kv_mode if args.kv_mode != "standard" else None
 
     summary = run_benchmark(
         model_name=args.model,
@@ -93,6 +102,7 @@ def main(argv: list[str] | None = None) -> None:
         kv_group_size=args.kv_group_size,
         draft_model=args.draft_model,
         num_draft_tokens=args.num_draft_tokens,
+        kv_mode=kv_mode,
     )
 
     if args.output_json:
@@ -106,6 +116,8 @@ def main(argv: list[str] | None = None) -> None:
         model_slug = Path(args.model).name or args.model.replace("/", "_")
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         kv_suffix = f"-kv{args.kv_bits}" if args.kv_bits else ""
+        if kv_mode == "turbo_quant":
+            kv_suffix = f"-turbo{args.kv_bits or 4}"
         draft_suffix = f"-spec{args.num_draft_tokens}" if args.draft_model else ""
         filename = f"{timestamp}-{model_slug}{kv_suffix}{draft_suffix}.json"
         save_path = save_dir / filename

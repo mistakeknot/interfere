@@ -84,6 +84,7 @@ class BenchmarkResult:
     output_preview: str  # first 200 chars
     category: str = ""
     kv_bits: int | None = None
+    kv_mode: str | None = None  # "turbo_quant" | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -105,6 +106,7 @@ class BenchmarkSummary:
     thermal_start: str
     thermal_end: str
     kv_bits: int | None = None
+    kv_mode: str | None = None
     draft_model: str | None = None
     num_draft_tokens: int | None = None
     results: list[BenchmarkResult] = field(default_factory=list)
@@ -136,6 +138,7 @@ def run_benchmark(
     kv_group_size: int = 64,
     draft_model: str | None = None,
     num_draft_tokens: int = 3,
+    kv_mode: str | None = None,
 ) -> BenchmarkSummary:
     """Run the full benchmark corpus against a model.
 
@@ -149,14 +152,28 @@ def run_benchmark(
         kv_group_size: Group size for KV cache quantization. Default: 64.
         draft_model: If set, use speculative decoding with this draft model.
         num_draft_tokens: Number of tokens to draft per step. Default: 3.
+        kv_mode: If "turbo_quant", enable polar-transformed KV quantization.
 
     Returns:
         BenchmarkSummary with per-prompt results and aggregated stats.
     """
+    from .experiments.config import ExperimentConfig
+
     if prompts is None:
         prompts = PROMPT_CORPUS
 
-    engine = InferenceEngine()
+    # Build experiment configs for TurboQuant mode
+    experiment_configs = {}
+    if kv_mode == "turbo_quant":
+        experiment_configs["turbo_quant"] = ExperimentConfig(
+            name="turbo_quant",
+            enabled=True,
+            params={"kv_bits": kv_bits or 4, "kv_group_size": kv_group_size},
+        )
+        # Engine handles kv_bits internally when turbo_quant is active
+        kv_bits = None
+
+    engine = InferenceEngine(experiment_configs=experiment_configs or None)
     thermal = ThermalMonitor()
 
     # Warm up: load model(s) into memory
@@ -220,6 +237,7 @@ def run_benchmark(
                 output_preview=output[:200],
                 category=category,
                 kv_bits=kv_bits,
+                kv_mode=kv_mode,
             )
         )
 
@@ -243,6 +261,7 @@ def run_benchmark(
         thermal_start=thermal_start.level,
         thermal_end=thermal_end.level,
         kv_bits=kv_bits,
+        kv_mode=kv_mode,
         draft_model=draft_model,
         num_draft_tokens=num_draft_tokens if draft_model else None,
         results=results,
