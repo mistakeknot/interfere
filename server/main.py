@@ -18,6 +18,7 @@ from .cascade import CascadeConfig, CascadeDecision, CascadeStats
 from .experiments.config import load_experiment_configs
 from .metal_worker import MetalWorker
 from .schema import ChatCompletionChunk
+from .shadow_log import ShadowEntry, ShadowLogger
 from .thermal import ThermalMonitor
 
 log = logging.getLogger("interfere")
@@ -197,6 +198,7 @@ async def _chat_completions(request: Request) -> JSONResponse | StreamingRespons
     cascade_config: CascadeConfig = request.app.state.cascade_config
     cascade_stats: CascadeStats = request.app.state.cascade_stats
     model_tiers: list[str] = request.app.state.model_tiers
+    shadow_logger: ShadowLogger | None = request.app.state.shadow_logger
 
     request_count["total"] += 1
 
@@ -283,6 +285,20 @@ async def _chat_completions(request: Request) -> JSONResponse | StreamingRespons
                 cascade_stats.total_probe_time_s += probe_resp.data.get(
                     "probe_time_s", 0
                 )
+                # Shadow log: local model accepted — log counterfactual cloud cost
+                if shadow_logger is not None:
+                    shadow_logger.log(
+                        ShadowEntry(
+                            cascade_decision="accept",
+                            confidence=avg_conf,
+                            local_model=tier_model,
+                            local_tokens=max_tokens,
+                            cloud_tokens_est=max_tokens,
+                            probe_time_s=probe_resp.data.get("probe_time_s", 0),
+                            models_tried=",".join(models_tried),
+                            escalation_count=i,
+                        )
+                    )
                 # Yield probe tokens, then continue with same model
                 generator = _generate_with_probe_prefix(
                     worker,
@@ -308,6 +324,20 @@ async def _chat_completions(request: Request) -> JSONResponse | StreamingRespons
             # Cloud fallback
             cascade_stats.cloud_fallbacks += 1
             cascade_stats.total_probe_time_s += probe_resp.data.get("probe_time_s", 0)
+            # Shadow log: cloud fallback — no local savings
+            if shadow_logger is not None:
+                shadow_logger.log(
+                    ShadowEntry(
+                        cascade_decision="cloud",
+                        confidence=avg_conf,
+                        local_model=tier_model,
+                        local_tokens=0,
+                        cloud_tokens_est=max_tokens,
+                        probe_time_s=probe_resp.data.get("probe_time_s", 0),
+                        models_tried=",".join(models_tried),
+                        escalation_count=i,
+                    )
+                )
             cascade_header["decision"] = CascadeDecision.CLOUD.value
             cascade_header["model"] = "cloud"
             latency_samples.append(time.monotonic() - t0)
@@ -439,6 +469,13 @@ def create_app(
     _latency_samples: list[float] = []
     _model_tiers = model_tiers or []
 
+    # Shadow cost logger — writes to interstat's SQLite DB
+    _shadow_logger: ShadowLogger | None = None
+    try:
+        _shadow_logger = ShadowLogger()
+    except Exception:
+        pass  # interstat DB not available — cascade still works without logging
+
     @asynccontextmanager
     async def _lifespan(app: Starlette):
         # Startup
@@ -450,11 +487,14 @@ def create_app(
         app.state.model_tiers = _model_tiers
         app.state.request_count = _request_count
         app.state.latency_samples = _latency_samples
+        app.state.shadow_logger = _shadow_logger
         if worker is not None:
             worker.start()
             app.state.worker = worker
         yield
         # Shutdown
+        if _shadow_logger is not None:
+            _shadow_logger.close()
         if worker is not None and worker.is_alive():
             worker.shutdown()
 
@@ -523,4 +563,5 @@ def create_app(
     app.state.model_tiers = _model_tiers
     app.state.request_count = _request_count
     app.state.latency_samples = _latency_samples
+    app.state.shadow_logger = _shadow_logger
     return app
