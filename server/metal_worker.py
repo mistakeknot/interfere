@@ -414,11 +414,18 @@ class MetalWorker:
                 if resp.status == "token":
                     yield resp.data.get("text", "")
                 elif resp.status == "done":
+                    # Store final metrics so caller can access after exhaustion.
+                    self._last_done_data = resp.data
                     return
                 elif resp.status == "error":
                     raise RuntimeError(resp.error or "generation failed")
                 else:
                     raise RuntimeError(f"unexpected status: {resp.status}")
+
+    @property
+    def last_generation_metrics(self) -> dict:
+        """Metrics from the most recent generate() call (available after generator exhaustion)."""
+        return getattr(self, "_last_done_data", {}).get("metrics", {})
 
     # -- internal transport --------------------------------------------------
 

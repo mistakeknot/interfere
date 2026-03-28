@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -16,6 +18,8 @@ from .experiments.config import load_experiment_configs
 from .metal_worker import MetalWorker
 from .schema import ChatCompletionChunk
 from .thermal import ThermalMonitor
+
+log = logging.getLogger("interfere")
 
 
 async def _health(request: Request) -> JSONResponse:
@@ -75,6 +79,8 @@ async def _generate_worker_tokens(
     """Yield SSE tokens from the Metal worker subprocess."""
     chunk = ChatCompletionChunk(model=model)
     loop = asyncio.get_running_loop()
+    t0 = time.monotonic()
+    completion_tokens = 0
 
     # Run the blocking generator in a thread so we don't block the event loop.
     # Each iteration of worker.generate() blocks on resp_queue.get().
@@ -97,12 +103,37 @@ async def _generate_worker_tokens(
         token_text = await loop.run_in_executor(None, _next_token)
         if token_text is None:
             break
+        completion_tokens += 1
         data = json.dumps(chunk.to_delta_dict(content=token_text))
         yield f"data: {data}\n\n"
 
-    data = json.dumps(chunk.to_delta_dict(finish_reason="stop"))
+    # Final chunk with usage stats from the Metal worker
+    elapsed = time.monotonic() - t0
+    metrics = worker.last_generation_metrics
+    final = chunk.to_delta_dict(finish_reason="stop")
+    final["usage"] = {
+        "completion_tokens": completion_tokens,
+        "total_time_s": round(elapsed, 3),
+        "generation_tps": metrics.get("generation_tps", 0),
+        "prompt_tps": metrics.get("prompt_tps", 0),
+        "peak_memory_gb": metrics.get("peak_memory_gb", 0),
+        "early_exit_rate": metrics.get("early_exit_rate", 0),
+        "mean_confidence": metrics.get("mean_confidence", 0),
+    }
+    data = json.dumps(final)
     yield f"data: {data}\n\n"
     yield "data: [DONE]\n\n"
+
+    # Log request metrics
+    log.info(
+        "request model=%s tokens=%d time=%.2fs tps=%.1f prompt_tps=%.1f mem=%.2fGB",
+        model,
+        completion_tokens,
+        elapsed,
+        metrics.get("generation_tps", 0),
+        metrics.get("prompt_tps", 0),
+        metrics.get("peak_memory_gb", 0),
+    )
 
 
 async def _chat_completions(request: Request) -> JSONResponse | StreamingResponse:
@@ -240,8 +271,60 @@ def create_app(dry_run: bool = False) -> Starlette:
         if worker is not None and worker.is_alive():
             worker.shutdown()
 
+    # Request counter for /metrics
+    _request_count = {"total": 0, "errors": 0}
+    _latency_samples: list[float] = []
+
+    async def _metrics(request: Request) -> JSONResponse:
+        """GET /metrics — JSON metrics for monitoring."""
+        w: MetalWorker | None = request.app.state.worker
+        t: ThermalMonitor | None = request.app.state.thermal
+
+        data: dict = {
+            "requests": _request_count.copy(),
+            "latency": {},
+            "thermal": {},
+            "memory": {},
+            "models": [],
+        }
+
+        if _latency_samples:
+            sorted_lat = sorted(_latency_samples)
+            n = len(sorted_lat)
+            data["latency"] = {
+                "count": n,
+                "mean_s": round(sum(sorted_lat) / n, 3),
+                "p50_s": round(sorted_lat[n // 2], 3),
+                "p95_s": round(sorted_lat[int(n * 0.95)], 3) if n >= 20 else None,
+                "p99_s": round(sorted_lat[int(n * 0.99)], 3) if n >= 100 else None,
+            }
+
+        if t is not None:
+            try:
+                ts = t.read()
+                data["thermal"] = {"level": ts.level, "raw_value": ts.raw_value}
+            except Exception:
+                pass
+
+        if w is not None and w.is_alive():
+            try:
+                resp = w.health(timeout=2.0)
+                d = resp.data
+                data["memory"] = {
+                    "active_mb": round(d.get("metal_active_memory", 0) / 1e6, 1),
+                    "peak_mb": round(d.get("metal_peak_memory", 0) / 1e6, 1),
+                    "limit_gb": round(d.get("memory_limit_bytes", 0) / 1e9, 1),
+                }
+                data["models"] = d.get("loaded_models", [])
+                data["experiment_hooks"] = d.get("experiment_hooks", {})
+            except Exception:
+                pass
+
+        return JSONResponse(data)
+
     routes = [
         Route("/health", _health, methods=["GET"]),
+        Route("/metrics", _metrics, methods=["GET"]),
         Route("/v1/chat/completions", _chat_completions, methods=["POST"]),
         Route("/v1/models/load", _load_model, methods=["POST"]),
     ]
