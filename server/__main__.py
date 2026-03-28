@@ -7,6 +7,7 @@ import sys
 
 import uvicorn
 
+from .cascade import CascadeConfig
 from .main import create_app
 
 
@@ -35,12 +36,45 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Model to preload at startup (e.g., mlx-community/Qwen3.5-35B-A3B-4bit)",
     )
+    parser.add_argument(
+        "--model-tiers",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Cascade model tiers, smallest to largest (e.g., small-4bit large-4bit)",
+    )
+    parser.add_argument(
+        "--cascade-accept",
+        type=float,
+        default=0.8,
+        help="Cascade accept threshold (default: 0.8)",
+    )
+    parser.add_argument(
+        "--cascade-cloud",
+        type=float,
+        default=0.4,
+        help="Cascade cloud fallback threshold (default: 0.4)",
+    )
+    parser.add_argument(
+        "--no-cascade",
+        action="store_true",
+        help="Disable confidence cascade even if model-tiers are set",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = _parse_args(argv)
-    app = create_app(dry_run=args.dry_run)
+    cascade_config = CascadeConfig(
+        accept_threshold=args.cascade_accept,
+        cloud_threshold=args.cascade_cloud,
+        enabled=not args.no_cascade,
+    )
+    app = create_app(
+        dry_run=args.dry_run,
+        model_tiers=args.model_tiers,
+        cascade_config=cascade_config,
+    )
 
     if args.preload and not args.dry_run:
         import httpx

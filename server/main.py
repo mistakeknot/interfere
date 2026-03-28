@@ -14,6 +14,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
+from .cascade import CascadeConfig, CascadeDecision, CascadeStats
 from .experiments.config import load_experiment_configs
 from .metal_worker import MetalWorker
 from .schema import ChatCompletionChunk
@@ -136,11 +137,73 @@ async def _generate_worker_tokens(
     )
 
 
+def _cascade_decide(config: CascadeConfig, confidence: float) -> CascadeDecision:
+    """Map a confidence score to a cascade decision."""
+    if confidence >= config.accept_threshold:
+        return CascadeDecision.ACCEPT
+    if confidence >= config.cloud_threshold:
+        return CascadeDecision.ESCALATE
+    return CascadeDecision.CLOUD
+
+
+async def _generate_with_probe_prefix(
+    worker: MetalWorker,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    temperature: float,
+    probe_tokens: list[str],
+    kv_bits: int | None = None,
+    kv_group_size: int = 64,
+) -> AsyncGenerator[str, None]:
+    """Yield probe tokens first, then continue generating the rest."""
+    chunk = ChatCompletionChunk(model=model)
+
+    # Yield the probe tokens we already have
+    for token_text in probe_tokens:
+        data = json.dumps(chunk.to_delta_dict(content=token_text))
+        yield f"data: {data}\n\n"
+
+    # Continue generating the remaining tokens
+    remaining = max_tokens - len(probe_tokens)
+    if remaining > 0:
+        async for sse_line in _generate_worker_tokens(
+            worker,
+            model,
+            messages,
+            remaining,
+            temperature,
+            kv_bits=kv_bits,
+            kv_group_size=kv_group_size,
+        ):
+            yield sse_line
+    else:
+        # All tokens came from the probe — send final chunk
+        data = json.dumps(chunk.to_delta_dict(finish_reason="stop"))
+        yield f"data: {data}\n\n"
+        yield "data: [DONE]\n\n"
+
+
 async def _chat_completions(request: Request) -> JSONResponse | StreamingResponse:
-    """POST /v1/chat/completions — streaming chat completion."""
+    """POST /v1/chat/completions — streaming chat completion.
+
+    When cascade is enabled and the worker is available, probes the model
+    for confidence before committing to full generation. If confidence is
+    too low, escalates to a larger model or signals cloud fallback.
+    """
+    t0 = time.monotonic()
+    request_count: dict = request.app.state.request_count
+    latency_samples: list = request.app.state.latency_samples
+    cascade_config: CascadeConfig = request.app.state.cascade_config
+    cascade_stats: CascadeStats = request.app.state.cascade_stats
+    model_tiers: list[str] = request.app.state.model_tiers
+
+    request_count["total"] += 1
+
     try:
         body = await request.json()
     except Exception:
+        request_count["errors"] += 1
         return JSONResponse(
             {
                 "error": {
@@ -153,6 +216,7 @@ async def _chat_completions(request: Request) -> JSONResponse | StreamingRespons
 
     messages = body.get("messages")
     if not messages:
+        request_count["errors"] += 1
         return JSONResponse(
             {
                 "error": {
@@ -172,9 +236,107 @@ async def _chat_completions(request: Request) -> JSONResponse | StreamingRespons
     dry_run: bool = request.app.state.dry_run
     worker: MetalWorker | None = request.app.state.worker
 
+    # --- Cascade logic ---
+    cascade_header: dict = {}
+
     if dry_run or worker is None:
         generator = _generate_dry_run_tokens(model)
+    elif cascade_config.enabled and model_tiers:
+        # Run cascade: probe each tier until one accepts or we exhaust all
+        cascade_stats.total_requests += 1
+        generator = None
+        models_tried: list[str] = []
+
+        for i, tier_model in enumerate(model_tiers):
+            models_tried.append(tier_model)
+            loop = asyncio.get_running_loop()
+            probe_resp = await loop.run_in_executor(
+                None,
+                lambda m=tier_model: worker.probe(
+                    model_name=m,
+                    messages=messages,
+                    probe_tokens=cascade_config.probe_tokens,
+                    temperature=temperature,
+                ),
+            )
+
+            if probe_resp.status == "error":
+                log.warning(
+                    "cascade probe failed for %s: %s", tier_model, probe_resp.error
+                )
+                continue
+
+            avg_conf = probe_resp.data.get("avg_confidence", 0.0)
+            probe_toks = probe_resp.data.get("tokens", [])
+            decision = _cascade_decide(cascade_config, avg_conf)
+
+            cascade_header = {
+                "decision": decision.value,
+                "model": tier_model,
+                "confidence": str(round(avg_conf, 4)),
+                "models_tried": ",".join(models_tried),
+                "escalations": str(i),
+            }
+
+            if decision == CascadeDecision.ACCEPT:
+                cascade_stats.accepts += 1
+                cascade_stats.total_probe_time_s += probe_resp.data.get(
+                    "probe_time_s", 0
+                )
+                # Yield probe tokens, then continue with same model
+                generator = _generate_with_probe_prefix(
+                    worker,
+                    tier_model,
+                    messages,
+                    max_tokens,
+                    temperature,
+                    probe_toks,
+                    kv_bits=kv_bits,
+                    kv_group_size=kv_group_size,
+                )
+                break
+
+            if decision == CascadeDecision.ESCALATE:
+                cascade_stats.total_probe_time_s += probe_resp.data.get(
+                    "probe_time_s", 0
+                )
+                if i < len(model_tiers) - 1:
+                    cascade_stats.escalations += 1
+                    continue  # try next tier
+                # Last tier — fall through to cloud
+
+            # Cloud fallback
+            cascade_stats.cloud_fallbacks += 1
+            cascade_stats.total_probe_time_s += probe_resp.data.get("probe_time_s", 0)
+            cascade_header["decision"] = CascadeDecision.CLOUD.value
+            cascade_header["model"] = "cloud"
+            latency_samples.append(time.monotonic() - t0)
+            return JSONResponse(
+                {
+                    "cascade": "cloud_fallback",
+                    "models_tried": models_tried,
+                    "confidence": avg_conf,
+                    "message": "All local models below confidence threshold — route to cloud",
+                },
+                status_code=200,
+                headers={
+                    "X-Interfere-Cascade": json.dumps(cascade_header),
+                },
+            )
+
+        if generator is None:
+            # All probes errored — fall back to first model without cascade
+            generator = _generate_worker_tokens(
+                worker,
+                model_tiers[0] if model_tiers else model,
+                messages,
+                max_tokens,
+                temperature,
+                kv_bits=kv_bits,
+                kv_group_size=kv_group_size,
+            )
     else:
+        # No cascade — direct generation
         generator = _generate_worker_tokens(
             worker,
             model,
@@ -185,13 +347,19 @@ async def _chat_completions(request: Request) -> JSONResponse | StreamingRespons
             kv_group_size=kv_group_size,
         )
 
+    latency_samples.append(time.monotonic() - t0)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    }
+    if cascade_header:
+        headers["X-Interfere-Cascade"] = json.dumps(cascade_header)
+
     return StreamingResponse(
         generator,
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        },
+        headers=headers,
     )
 
 
@@ -239,11 +407,18 @@ async def _load_model(request: Request) -> JSONResponse:
     return JSONResponse({"status": "loaded", "model": model_name, "data": resp.data})
 
 
-def create_app(dry_run: bool = False) -> Starlette:
+def create_app(
+    dry_run: bool = False,
+    model_tiers: list[str] | None = None,
+    cascade_config: CascadeConfig | None = None,
+) -> Starlette:
     """Create the interfere Starlette application.
 
     When *dry_run* is False, a MetalWorker subprocess is spawned on startup
     and shut down on application exit.
+
+    *model_tiers* configures the cascade ordering (smallest → largest).
+    *cascade_config* tunes thresholds; defaults are sensible.
     """
     exp_configs = load_experiment_configs()
     worker: MetalWorker | None = (
@@ -257,12 +432,24 @@ def create_app(dry_run: bool = False) -> Starlette:
     except Exception:
         pass  # Non-macOS or libSystem unavailable
 
+    # Cascade and metrics state — shared across requests via app.state
+    _cascade_config = cascade_config or CascadeConfig()
+    _cascade_stats = CascadeStats()
+    _request_count: dict = {"total": 0, "errors": 0}
+    _latency_samples: list[float] = []
+    _model_tiers = model_tiers or []
+
     @asynccontextmanager
     async def _lifespan(app: Starlette):
         # Startup
         app.state.dry_run = dry_run
         app.state.worker = None
         app.state.thermal = thermal
+        app.state.cascade_config = _cascade_config
+        app.state.cascade_stats = _cascade_stats
+        app.state.model_tiers = _model_tiers
+        app.state.request_count = _request_count
+        app.state.latency_samples = _latency_samples
         if worker is not None:
             worker.start()
             app.state.worker = worker
@@ -270,10 +457,6 @@ def create_app(dry_run: bool = False) -> Starlette:
         # Shutdown
         if worker is not None and worker.is_alive():
             worker.shutdown()
-
-    # Request counter for /metrics
-    _request_count = {"total": 0, "errors": 0}
-    _latency_samples: list[float] = []
 
     async def _metrics(request: Request) -> JSONResponse:
         """GET /metrics — JSON metrics for monitoring."""
@@ -286,6 +469,7 @@ def create_app(dry_run: bool = False) -> Starlette:
             "thermal": {},
             "memory": {},
             "models": [],
+            "cascade": _cascade_stats.to_dict(),
         }
 
         if _latency_samples:
@@ -334,4 +518,9 @@ def create_app(dry_run: bool = False) -> Starlette:
     app.state.dry_run = dry_run
     app.state.worker = None
     app.state.thermal = thermal
+    app.state.cascade_config = _cascade_config
+    app.state.cascade_stats = _cascade_stats
+    app.state.model_tiers = _model_tiers
+    app.state.request_count = _request_count
+    app.state.latency_samples = _latency_samples
     return app

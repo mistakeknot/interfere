@@ -32,7 +32,7 @@ class CascadeConfig:
 
     accept_threshold: float = 0.8
     escalate_threshold: float = 0.6
-    cloud_threshold: float = 0.6
+    cloud_threshold: float = 0.4
     probe_tokens: int = 3  # how many tokens to generate before deciding
     enabled: bool = True
 
