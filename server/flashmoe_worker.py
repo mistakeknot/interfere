@@ -151,12 +151,17 @@ class FlashMoeWorker:
 
         log.info("starting flash-moe: %s", " ".join(cmd))
 
+        # Run from the binary's directory so it finds shaders.metal
+        # (flash-moe looks for shaders.metal in CWD or metal_infer/).
+        binary_dir = os.path.dirname(self._binary_path)
+
         # Merge stdout+stderr so we see all flash-moe output in one stream.
         # Flash-moe writes progress info to stderr during loading.
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            cwd=binary_dir or None,
         )
 
         # Background thread to drain and log subprocess output
