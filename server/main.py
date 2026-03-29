@@ -756,6 +756,8 @@ def create_app(
     flashmoe_extra_args: list[str] | None = None,
     flashmoe_model_name: str = "flash-moe",
     flashmoe_only: bool = False,
+    flashmoe_malloc_cache: int = 0,
+    flashmoe_predict: bool = False,
     batch_scheduler: object | None = None,
 ) -> Starlette:
     """Create the interfere Starlette application.
@@ -795,6 +797,8 @@ def create_app(
             model_path=flashmoe_model_path,
             port=flashmoe_port,
             extra_args=flashmoe_extra_args,
+            malloc_cache=flashmoe_malloc_cache,
+            predict=flashmoe_predict,
         )
     _inference_queue = PriorityRequestQueue(max_depth=max_queue_depth)
     _thermal_reject_threshold = THERMAL_LEVEL_MAP.get(thermal_reject_level, 2)

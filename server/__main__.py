@@ -148,6 +148,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Use only flash-moe backend, skip MetalWorker (saves ~5 GB GPU)",
     )
+    fm.add_argument(
+        "--flashmoe-malloc-cache",
+        type=int,
+        default=0,
+        help="GPU-resident expert LRU cache entries (0 = disabled, 10000 = ~54 GB for 88%% hit rate)",
+    )
+    fm.add_argument(
+        "--flashmoe-predict",
+        action="store_true",
+        help="Enable temporal expert prediction (prefetch during GPU compute wait)",
+    )
 
     return parser.parse_args(argv)
 
@@ -189,6 +200,8 @@ def main(argv: list[str] | None = None) -> None:
         flashmoe_extra_args=args.flashmoe_args.split() if args.flashmoe_args else None,
         flashmoe_model_name=args.flashmoe_model_name,
         flashmoe_only=args.flashmoe_only,
+        flashmoe_malloc_cache=args.flashmoe_malloc_cache,
+        flashmoe_predict=args.flashmoe_predict,
         batch_scheduler=batch_scheduler,
     )
 
