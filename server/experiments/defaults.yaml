@@ -1,4 +1,4 @@
-# Default experiment configuration for interfere.
+# Default experiment configuration for interfer.
 # Override per-experiment via INTERFERE_EXP_{NAME}_{PARAM} env vars.
 # See server/experiments/config.py for loader details.
 
