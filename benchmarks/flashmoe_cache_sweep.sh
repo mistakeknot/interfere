@@ -11,6 +11,7 @@
 set -euo pipefail
 
 BINARY="${FLASHMOE_BINARY:-$HOME/projects/flash-moe/metal_infer/infer}"
+BINARY_DIR="$(dirname "$BINARY")"
 MODEL="${FLASHMOE_MODEL:-$HOME/Models/flash_mlx_4bit}"
 PORT="${FLASHMOE_PORT:-8423}"
 THINK_BUDGET="${FLASHMOE_THINK_BUDGET:-512}"
@@ -24,7 +25,8 @@ fi
 WARMUP_PROMPTS=3
 BENCH_PROMPTS=5
 MAX_TOKENS=32
-RESULTS_FILE="benchmarks/results_$(date +%Y%m%d_%H%M%S).tsv"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RESULTS_FILE="${SCRIPT_DIR}/results_$(date +%Y%m%d_%H%M%S).tsv"
 LOGFILE="/tmp/flashmoe_bench.log"
 
 # Benchmark prompts (varied complexity to exercise different expert routes)
@@ -42,6 +44,19 @@ PROMPTS=(
 kill_flashmoe() {
     pkill -f "infer.*--serve.*$PORT" 2>/dev/null || true
     sleep 2
+}
+
+check_memory_pressure() {
+    # Returns 1 if system-wide free memory < 10% (real pressure, not just swap usage)
+    # macOS aggressively compresses to swap even with 83% free — swap alone is unreliable
+    local free_pct
+    free_pct=$(memory_pressure 2>/dev/null | grep -o 'free percentage: [0-9]*%' | grep -o '[0-9]*' || echo "100")
+    echo "  Memory free: ${free_pct}%"
+    if [[ "$free_pct" -lt 10 ]]; then
+        echo "WARNING: System memory free ${free_pct}% < 10% threshold — memory pressure too high" >&2
+        return 1
+    fi
+    return 0
 }
 
 wait_for_ready() {
@@ -82,9 +97,9 @@ extract_metrics() {
 }
 
 extract_cache_stats() {
-    # Parse malloc_cache final stats from log
+    # Parse malloc_cache final stats from log (may not exist for cache=0)
     local log="$1"
-    grep "malloc_cache.*Final\|malloc_cache.*hit rate\|cache.*hits.*misses" "$log" | tail -1
+    grep "malloc_cache.*Final\|malloc_cache.*hit rate\|cache.*hits.*misses" "$log" | tail -1 || true
 }
 
 echo "═══════════════════════════════════════════════════════"
@@ -100,8 +115,7 @@ echo "Results:   $RESULTS_FILE"
 echo "═══════════════════════════════════════════════════════"
 echo ""
 
-# Write TSV header
-mkdir -p "$(dirname "$RESULTS_FILE")"
+# Write TSV header (RESULTS_FILE is already in SCRIPT_DIR which exists)
 printf "cache_entries\tcache_gb\tstartup_s\tmean_tps\tmedian_tps\tmin_tps\tmax_tps\tcache_hits\tcache_misses\thit_rate\tpredict\n" > "$RESULTS_FILE"
 
 for cache_size in "${CACHE_SIZES[@]}"; do
@@ -109,6 +123,11 @@ for cache_size in "${CACHE_SIZES[@]}"; do
     echo "───────────────────────────────────────────────────"
     echo "Testing: --malloc-cache $cache_size"
     echo "───────────────────────────────────────────────────"
+
+    if ! check_memory_pressure; then
+        echo "ABORT: Skipping cache=$cache_size and remaining configs due to memory pressure"
+        break
+    fi
 
     kill_flashmoe
     : > "$LOGFILE"
@@ -118,14 +137,14 @@ for cache_size in "${CACHE_SIZES[@]}"; do
     if [[ "$cache_size" -gt 0 ]]; then
         CMD+=(--malloc-cache "$cache_size")
     fi
-    # Always enable cache-entries as LRU fallback
-    CMD+=(--cache-entries 2500)
+    # Always enable cache-entries as LRU fallback + telemetry
+    CMD+=(--cache-entries 2500 --cache-telemetry)
 
     echo "Command: ${CMD[*]}"
     t_start=$(date +%s)
 
-    # Start flash-moe
-    "${CMD[@]}" > "$LOGFILE" 2>&1 &
+    # Start flash-moe from binary dir (shaders.metal must be in CWD)
+    (cd "$BINARY_DIR" && "${CMD[@]}") > "$LOGFILE" 2>&1 &
     FM_PID=$!
 
     if ! wait_for_ready 300; then
@@ -137,6 +156,29 @@ for cache_size in "${CACHE_SIZES[@]}"; do
     t_ready=$(date +%s)
     startup_s=$((t_ready - t_start))
     echo "Startup: ${startup_s}s"
+
+    # Validation: first prompt captures SSE response to verify inference works
+    echo "Validating inference output..."
+    validation_resp=$(curl -s --max-time 120 "http://127.0.0.1:$PORT/v1/chat/completions" \
+        -H "Content-Type: application/json" \
+        -d '{"messages":[{"role":"user","content":"What is 2+2? Answer with just the number."}],"max_tokens":8,"stream":true}' 2>/dev/null || echo "")
+    if [[ -z "$validation_resp" ]]; then
+        echo "ERROR: Inference validation failed for cache=$cache_size (empty response)"
+        kill_flashmoe
+        continue
+    fi
+    # SSE response: check for any content delta or [DONE]
+    if echo "$validation_resp" | grep -q '\[DONE\]'; then
+        content=$(echo "$validation_resp" | grep -o '"content":"[^"]*"' | head -3 | tr '\n' ' ')
+        echo "  Validation OK: $content"
+    elif echo "$validation_resp" | grep -q '"error"'; then
+        echo "ERROR: Inference returned error for cache=$cache_size"
+        echo "  $(echo "$validation_resp" | head -3)"
+        kill_flashmoe
+        continue
+    else
+        echo "  Validation: got response ($(echo "$validation_resp" | wc -c | tr -d ' ') bytes)"
+    fi
 
     # Warmup phase
     echo "Warming up ($WARMUP_PROMPTS prompts)..."
@@ -157,7 +199,9 @@ for cache_size in "${CACHE_SIZES[@]}"; do
     done
 
     # Extract metrics
-    mapfile -t tps_values < <(extract_metrics "$LOGFILE" "$WARMUP_PROMPTS" | awk '{print $2}')
+    # Skip validation prompt + warmup prompts (validation is the first generation entry)
+    skip_count=$((WARMUP_PROMPTS + 1))
+    mapfile -t tps_values < <(extract_metrics "$LOGFILE" "$skip_count" | awk '{print $2}')
 
     if [[ ${#tps_values[@]} -eq 0 ]]; then
         echo "WARNING: No generation metrics found in log"
@@ -184,10 +228,17 @@ for cache_size in "${CACHE_SIZES[@]}"; do
     cache_stats=$(extract_cache_stats "$LOGFILE")
     cache_gb=$(echo "scale=1; $cache_size * 5439488 / 1000000000" | bc -l 2>/dev/null || echo "0")
 
-    # Parse hit/miss from log
-    cache_hits=$(echo "$cache_stats" | grep -o '[0-9]* hits' | awk '{print $1}' || echo "0")
-    cache_misses=$(echo "$cache_stats" | grep -o '[0-9]* misses' | awk '{print $1}' || echo "0")
-    hit_rate=$(echo "$cache_stats" | grep -o '[0-9.]*%' | head -1 || echo "0%")
+    # Parse hit/miss from log (use cache telemetry if malloc_cache stats unavailable)
+    if [[ -n "$cache_stats" ]]; then
+        cache_hits=$(echo "$cache_stats" | grep -o '[0-9]* hits' | awk '{print $1}' || echo "0")
+        cache_misses=$(echo "$cache_stats" | grep -o '[0-9]* misses' | awk '{print $1}' || echo "0")
+        hit_rate=$(echo "$cache_stats" | grep -o '[0-9.]*%' | head -1 || echo "0%")
+    else
+        # Fall back to cache telemetry effective hit rate
+        hit_rate=$(grep "Effective hit rate:" "$LOGFILE" | tail -1 | grep -o '[0-9.]*%' || echo "N/A")
+        cache_hits="N/A"
+        cache_misses="N/A"
+    fi
 
     echo ""
     echo "Results: mean=${mean_tps} tok/s, median=${median_tps}, range=[${min_tps}, ${max_tps}]"
