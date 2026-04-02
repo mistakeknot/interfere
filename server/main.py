@@ -1,4 +1,4 @@
-"""Starlette app factory for interfere inference server."""
+"""Starlette app factory for interfer inference server."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ from .schema import ChatCompletionChunk
 from .shadow_log import ShadowEntry, ShadowLogger
 from .thermal import ThermalMonitor
 
-log = logging.getLogger("interfere")
+log = logging.getLogger("interfer")
 
 # Maximum quality samples retained in memory (ring buffer behavior)
 _MAX_QUALITY_SAMPLES = 1000
@@ -144,7 +144,7 @@ async def _generate_dry_run_tokens(
 ) -> AsyncGenerator[str, None]:
     """Yield fake SSE tokens for dry-run mode."""
     chunk = ChatCompletionChunk(model=model)
-    tokens = ["Hello", " from", " interfere", "!"]
+    tokens = ["Hello", " from", " interfer", "!"]
 
     for token in tokens:
         data = json.dumps(chunk.to_delta_dict(content=token))
@@ -428,7 +428,7 @@ async def _chat_completions(request: Request) -> JSONResponse | StreamingRespons
 
     # -- Enqueue and track wait time --
     # Client priority: X-Interfere-Priority header (default 5, lower = higher)
-    client_priority = int(request.headers.get("x-interfere-priority", "5"))
+    client_priority = int(request.headers.get("x-interfer-priority", "5"))
     client_priority = max(0, min(10, client_priority))  # clamp to 0-10
 
     request_count["total"] += 1
@@ -758,9 +758,13 @@ def create_app(
     flashmoe_only: bool = False,
     flashmoe_malloc_cache: int = 0,
     flashmoe_predict: bool = False,
+    flashmoe_q3_experts: bool = False,
+    flashmoe_cache_io_split: int = 0,
+    flashmoe_gguf_embedding: str = "",
+    flashmoe_gguf_lm_head: str = "",
     batch_scheduler: object | None = None,
 ) -> Starlette:
-    """Create the interfere Starlette application.
+    """Create the interfer Starlette application.
 
     When *dry_run* is False, a MetalWorker subprocess is spawned on startup
     and shut down on application exit.
@@ -799,6 +803,10 @@ def create_app(
             extra_args=flashmoe_extra_args,
             malloc_cache=flashmoe_malloc_cache,
             predict=flashmoe_predict,
+            q3_experts=flashmoe_q3_experts,
+            cache_io_split=flashmoe_cache_io_split,
+            gguf_embedding=flashmoe_gguf_embedding,
+            gguf_lm_head=flashmoe_gguf_lm_head,
         )
     _inference_queue = PriorityRequestQueue(max_depth=max_queue_depth)
     _thermal_reject_threshold = THERMAL_LEVEL_MAP.get(thermal_reject_level, 2)
