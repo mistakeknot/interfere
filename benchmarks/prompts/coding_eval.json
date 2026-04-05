@@ -1,0 +1,46 @@
+[
+  {
+    "id": "lcs_algorithm",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a Python function that finds the longest common subsequence of two strings. Include type hints, a docstring, and 3 unit tests using pytest. Return both the length and the actual subsequence string."
+      }
+    ],
+    "max_tokens": 512,
+    "description": "Algorithm implementation with tests"
+  },
+  {
+    "id": "code_review",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review this Python function for bugs, performance issues, and style problems. List each issue with severity (critical/warning/info):\n\n```python\ndef process_users(db, user_ids):\n    results = []\n    for id in user_ids:\n        query = f\"SELECT * FROM users WHERE id = {id}\"\n        user = db.execute(query).fetchone()\n        if user != None:\n            user_dict = {}\n            for key in user.keys():\n                user_dict[key] = user[key]\n            if user_dict['age'] > 0:\n                user_dict['is_adult'] = user_dict['age'] >= 18\n            results.append(user_dict)\n    return results\n```"
+      }
+    ],
+    "max_tokens": 512,
+    "description": "Code review with planted bugs (SQL injection, None comparison, N+1)"
+  },
+  {
+    "id": "refactor",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Refactor this function to be cleaner, more Pythonic, and handle edge cases. Explain each change:\n\n```python\ndef get_stats(numbers):\n    if len(numbers) == 0:\n        return None\n    total = 0\n    for n in numbers:\n        total = total + n\n    mean = total / len(numbers)\n    sorted_nums = []\n    for n in numbers:\n        inserted = False\n        for i in range(len(sorted_nums)):\n            if n < sorted_nums[i]:\n                sorted_nums.insert(i, n)\n                inserted = True\n                break\n        if not inserted:\n            sorted_nums.append(n)\n    if len(sorted_nums) % 2 == 0:\n        median = (sorted_nums[len(sorted_nums)//2 - 1] + sorted_nums[len(sorted_nums)//2]) / 2\n    else:\n        median = sorted_nums[len(sorted_nums)//2]\n    return {'mean': mean, 'median': median, 'min': sorted_nums[0], 'max': sorted_nums[-1]}\n```"
+      }
+    ],
+    "max_tokens": 512,
+    "description": "Refactoring messy code with explanation"
+  },
+  {
+    "id": "system_design",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Design a token bucket rate limiter class in Python. Requirements:\n1. Configurable rate (tokens per second) and burst capacity\n2. Thread-safe\n3. Support both blocking and non-blocking acquire\n4. Include a decorator for rate-limiting function calls\n\nProvide the implementation with type hints and explain the tradeoffs of token bucket vs sliding window vs fixed window approaches."
+      }
+    ],
+    "max_tokens": 1024,
+    "description": "System design with implementation and tradeoff analysis"
+  }
+]
