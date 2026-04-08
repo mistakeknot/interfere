@@ -53,12 +53,16 @@ def main(argv: list[str] | None = None) -> None:
     t0 = time.monotonic()
     model, tokenizer = load(args.model)
     load_time = time.monotonic() - t0
-    num_layers = len(model.model.layers)
-    print(f"Loaded in {load_time:.1f}s — {num_layers} layers")
-
     # Import PoC
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
-    from experiments.early_exit import self_speculative_generate
+    from experiments.early_exit import (
+        self_speculative_generate,
+        _resolve_model_internals,
+    )
+
+    layers, _, _, _ = _resolve_model_internals(model)
+    num_layers = len(layers)
+    print(f"Loaded in {load_time:.1f}s — {num_layers} layers")
 
     results = []
 

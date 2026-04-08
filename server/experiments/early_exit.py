@@ -50,6 +50,39 @@ class EarlyExitHook:
         self._total_count = 0
 
 
+def _resolve_model_internals(model):
+    """Resolve layers, norm, embed_tokens, lm_head from different model structures.
+
+    MLX models have varying nesting:
+    - TextModel: model.model.layers, model.model.norm, model.lm_head
+    - Model (VL wrapper): model.language_model.model.layers, etc.
+    """
+    # Try direct .model path first (TextModel)
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        base = model.model
+        lm = model
+    # Try language_model path (Model wrapping TextModel)
+    elif hasattr(model, "language_model"):
+        lm = model.language_model
+        base = lm.model
+    else:
+        raise AttributeError(
+            f"Cannot find layers on {type(model).__name__}. "
+            "Expected .model.layers or .language_model.model.layers"
+        )
+
+    layers = base.layers
+    norm = base.norm
+    embed_tokens = base.embed_tokens
+
+    if hasattr(lm, "lm_head"):
+        lm_head = lm.lm_head
+    else:
+        lm_head = embed_tokens.as_linear
+
+    return layers, norm, embed_tokens, lm_head
+
+
 def self_speculative_generate(
     model,
     tokenizer,
@@ -70,22 +103,18 @@ def self_speculative_generate(
     """
     from mlx_lm.models.cache import make_prompt_cache
 
+    layers, norm, embed_tokens, lm_head = _resolve_model_internals(model)
+
     tokens = mx.array(tokenizer.encode(prompt))[None]  # (1, seq_len)
-    num_layers = len(model.model.layers)
+    num_layers = len(layers)
     if exit_layer >= num_layers:
         raise ValueError(f"exit_layer={exit_layer} must be < num_layers={num_layers}")
 
     cache = make_prompt_cache(model)
-    norm = model.model.norm
-    # lm_head: tied embeddings or separate linear
-    if hasattr(model, "lm_head"):
-        lm_head = model.lm_head
-    else:
-        lm_head = model.model.embed_tokens.as_linear
 
     # --- Prefill: run ALL layers on the full prompt ---
-    h = model.model.embed_tokens(tokens)
-    for i, layer in enumerate(model.model.layers):
+    h = embed_tokens(tokens)
+    for i, layer in enumerate(layers):
         h = layer(h, mask=None, cache=cache[i])
     h = norm(h)
     logits = lm_head(h[:, -1:, :])
@@ -101,9 +130,9 @@ def self_speculative_generate(
     for _ in range(max_tokens - 1):
         tok = next_token
         # --- Draft pass: first exit_layer layers ---
-        h = model.model.embed_tokens(tok)
+        h = embed_tokens(tok)
         for i in range(exit_layer):
-            h = model.model.layers[i](h, mask=None, cache=cache[i])
+            h = layers[i](h, mask=None, cache=cache[i])
 
         draft_logits = lm_head(norm(h))
         draft_probs = mx.softmax(draft_logits, axis=-1)
@@ -116,13 +145,13 @@ def self_speculative_generate(
             # fill strategy instead. For the PoC, this measures acceptance rate
             # accurately while maintaining cache correctness.
             for i in range(exit_layer, num_layers):
-                h = model.model.layers[i](h, mask=None, cache=cache[i])
+                h = layers[i](h, mask=None, cache=cache[i])
             next_token = draft_token
             accepted_count += 1
         else:
             # Verify — run remaining layers
             for i in range(exit_layer, num_layers):
-                h = model.model.layers[i](h, mask=None, cache=cache[i])
+                h = layers[i](h, mask=None, cache=cache[i])
             full_logits = lm_head(norm(h))
             next_token = mx.argmax(full_logits, axis=-1)
             verified_count += 1
