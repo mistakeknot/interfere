@@ -1,0 +1,218 @@
+[
+  {
+    "id": "algo_lcs",
+    "category": "algorithm",
+    "difficulty": "C2",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a Python function `lcs(a: str, b: str) -> tuple[int, str]` that returns the length and actual string of the longest common subsequence. Include type hints and a docstring."
+      }
+    ],
+    "max_tokens": 512,
+    "exec_test": "from solution import lcs\nassert lcs('ABCBDAB', 'BDCAB') == (4, 'BCAB')\nassert lcs('', 'abc') == (0, '')\nassert lcs('abc', 'abc') == (3, 'abc')\nassert lcs('abc', 'def') == (0, '')\nassert lcs('a', 'a') == (1, 'a')\nprint('PASS')",
+    "description": "Classic DP algorithm. Tests correctness + edge cases."
+  },
+  {
+    "id": "algo_topo_sort",
+    "category": "algorithm",
+    "difficulty": "C2",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a Python function `topo_sort(graph: dict[str, list[str]]) -> list[str]` that returns a topological ordering of nodes in a directed acyclic graph. Raise ValueError if the graph has a cycle. The graph is an adjacency list: keys are nodes, values are lists of nodes they point to."
+      }
+    ],
+    "max_tokens": 512,
+    "exec_test": "from solution import topo_sort\nresult = topo_sort({'a': ['b', 'c'], 'b': ['d'], 'c': ['d'], 'd': []})\nassert result.index('a') < result.index('b')\nassert result.index('a') < result.index('c')\nassert result.index('b') < result.index('d')\nassert result.index('c') < result.index('d')\nresult2 = topo_sort({'x': []})\nassert result2 == ['x']\ntry:\n    topo_sort({'a': ['b'], 'b': ['a']})\n    assert False, 'Should raise ValueError for cycle'\nexcept ValueError:\n    pass\nprint('PASS')",
+    "description": "Graph algorithm with cycle detection. Tests structural correctness."
+  },
+  {
+    "id": "code_review",
+    "category": "review",
+    "difficulty": "C2",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review this Python function for bugs, performance issues, and style problems. List each issue with severity (critical/warning/info):\n\n```python\ndef process_users(db, user_ids):\n    results = []\n    for id in user_ids:\n        query = f\"SELECT * FROM users WHERE id = {id}\"\n        user = db.execute(query).fetchone()\n        if user != None:\n            user_dict = {}\n            for key in user.keys():\n                user_dict[key] = user[key]\n            if user_dict['age'] > 0:\n                user_dict['is_adult'] = user_dict['age'] >= 18\n            results.append(user_dict)\n    return results\n```"
+      }
+    ],
+    "max_tokens": 512,
+    "exec_test": null,
+    "judge_rubric": {
+      "must_identify": [
+        "SQL injection",
+        "is not None vs != None",
+        "N+1 query pattern"
+      ],
+      "should_identify": [
+        "shadowing builtin 'id'",
+        "manual dict construction vs dict(row)"
+      ],
+      "bonus": [
+        "suggesting parameterized queries",
+        "suggesting batch query"
+      ]
+    },
+    "description": "Code review with planted bugs. Tests analytical reasoning."
+  },
+  {
+    "id": "refactor_stats",
+    "category": "refactor",
+    "difficulty": "C2",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Refactor this function to be cleaner and more Pythonic. Keep the same interface and behavior:\n\n```python\ndef get_stats(numbers):\n    if len(numbers) == 0:\n        return None\n    total = 0\n    for n in numbers:\n        total = total + n\n    mean = total / len(numbers)\n    sorted_nums = []\n    for n in numbers:\n        inserted = False\n        for i in range(len(sorted_nums)):\n            if n < sorted_nums[i]:\n                sorted_nums.insert(i, n)\n                inserted = True\n                break\n        if not inserted:\n            sorted_nums.append(n)\n    if len(sorted_nums) % 2 == 0:\n        median = (sorted_nums[len(sorted_nums)//2 - 1] + sorted_nums[len(sorted_nums)//2]) / 2\n    else:\n        median = sorted_nums[len(sorted_nums)//2]\n    return {'mean': mean, 'median': median, 'min': sorted_nums[0], 'max': sorted_nums[-1]}\n```"
+      }
+    ],
+    "max_tokens": 512,
+    "exec_test": "from solution import get_stats\nassert get_stats([]) is None\nr = get_stats([1, 2, 3, 4, 5])\nassert r['mean'] == 3.0\nassert r['median'] == 3\nassert r['min'] == 1\nassert r['max'] == 5\nr2 = get_stats([1, 2, 3, 4])\nassert r2['median'] == 2.5\nr3 = get_stats([42])\nassert r3['mean'] == 42\nassert r3['median'] == 42\nprint('PASS')",
+    "description": "Refactoring with behavioral equivalence. Tests code quality AND correctness."
+  },
+  {
+    "id": "system_design",
+    "category": "design",
+    "difficulty": "C3",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Design and implement a thread-safe token bucket rate limiter in Python. Requirements:\n1. Configurable rate (tokens per second) and burst capacity\n2. Thread-safe using threading.Lock\n3. Non-blocking `try_acquire() -> bool` method\n4. Blocking `acquire(timeout: float) -> bool` method\n5. Include type hints\n\nProvide the complete implementation."
+      }
+    ],
+    "max_tokens": 1024,
+    "exec_test": "import time, threading\nfrom solution import TokenBucketRateLimiter\nlimiter = TokenBucketRateLimiter(rate=10, burst=5)\nassert limiter.try_acquire()\nfor _ in range(4):\n    assert limiter.try_acquire()\nassert not limiter.try_acquire()  # burst exhausted\ntime.sleep(0.15)  # wait for ~1.5 tokens to refill\nassert limiter.try_acquire()\n# Thread safety: concurrent acquire shouldn't crash\ndef worker():\n    for _ in range(100):\n        limiter.try_acquire()\nthreads = [threading.Thread(target=worker) for _ in range(4)]\nfor t in threads: t.start()\nfor t in threads: t.join()\nprint('PASS')",
+    "description": "System design with concurrency. Tests design quality + thread safety."
+  },
+  {
+    "id": "tool_call_json",
+    "category": "tool_calling",
+    "difficulty": "C1",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You have access to the following tools:\n- search(query: str) -> list[str]: Search the web\n- get_weather(city: str, unit: str = \"celsius\") -> dict: Get current weather\n\nRespond with a JSON tool call when the user's request requires a tool. Format: {\"tool\": \"name\", \"args\": {...}}"
+      },
+      {
+        "role": "user",
+        "content": "What's the weather like in Tokyo right now?"
+      }
+    ],
+    "max_tokens": 128,
+    "exec_test": "import json\nwith open('output.txt') as f:\n    text = f.read().strip()\n# Find JSON in the output\nimport re\nmatch = re.search(r'\\{[^}]+\\}', text)\nassert match, f'No JSON found in output: {text[:200]}'\ndata = json.loads(match.group())\nassert data.get('tool') == 'get_weather', f'Wrong tool: {data}'\nassert 'tokyo' in str(data.get('args', {})).lower(), f'Tokyo not in args: {data}'\nprint('PASS')",
+    "description": "Tool call formatting. Tests instruction following + JSON structure."
+  },
+  {
+    "id": "tool_call_multi",
+    "category": "tool_calling",
+    "difficulty": "C2",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You have access to these tools:\n- read_file(path: str) -> str: Read a file's contents\n- write_file(path: str, content: str) -> bool: Write content to a file\n- run_command(cmd: str) -> str: Execute a shell command\n\nPlan and execute the user's request using tool calls. Output each step as a JSON object on its own line."
+      },
+      {
+        "role": "user",
+        "content": "Read the file config.yaml, add a new key 'debug: true' at the end, write it back, then verify by reading it again."
+      }
+    ],
+    "max_tokens": 512,
+    "exec_test": null,
+    "judge_rubric": {
+      "must_include": [
+        "read_file call for config.yaml",
+        "write_file call with debug: true",
+        "second read_file to verify"
+      ],
+      "should_include": [
+        "correct ordering of operations",
+        "valid JSON for each tool call"
+      ],
+      "bonus": [
+        "error handling if file doesn't exist",
+        "preserving existing content"
+      ]
+    },
+    "description": "Multi-step tool orchestration. Tests planning + sequencing."
+  },
+  {
+    "id": "debug_fix",
+    "category": "debugging",
+    "difficulty": "C2",
+    "messages": [
+      {
+        "role": "user",
+        "content": "This function should flatten a nested dictionary but it has bugs. Fix it and explain what was wrong:\n\n```python\ndef flatten_dict(d, parent_key='', sep='.'):\n    items = []\n    for k, v in d.items():\n        new_key = parent_key + sep + k if parent_key else k\n        if isinstance(v, dict):\n            items.extend(flatten_dict(v, new_key, sep=sep))\n        else:\n            items.append((new_key, v))\n    return items\n```\n\nExpected: `flatten_dict({'a': 1, 'b': {'c': 2, 'd': {'e': 3}}})` should return `{'a': 1, 'b.c': 2, 'b.d.e': 3}`"
+      }
+    ],
+    "max_tokens": 512,
+    "exec_test": "from solution import flatten_dict\nassert flatten_dict({'a': 1, 'b': {'c': 2, 'd': {'e': 3}}}) == {'a': 1, 'b.c': 2, 'b.d.e': 3}\nassert flatten_dict({}) == {}\nassert flatten_dict({'x': 1}) == {'x': 1}\nassert flatten_dict({'a': {'b': {'c': 1}}}) == {'a.b.c': 1}\nprint('PASS')",
+    "description": "Bug identification + fix. The function returns list of tuples, not dict."
+  },
+  {
+    "id": "reasoning_logic",
+    "category": "reasoning",
+    "difficulty": "C2",
+    "messages": [
+      {
+        "role": "user",
+        "content": "A farmer has 17 sheep. All but 9 die. How many sheep does the farmer have left? Think step by step."
+      }
+    ],
+    "max_tokens": 256,
+    "exec_test": null,
+    "judge_rubric": {
+      "correct_answer": "9",
+      "must_include": [
+        "9 sheep remain"
+      ],
+      "common_errors": [
+        "8 (subtracting 9 from 17)",
+        "17-9=8"
+      ]
+    },
+    "description": "Classic trick question. Tests careful reading + reasoning."
+  },
+  {
+    "id": "instruction_exact",
+    "category": "instruction",
+    "difficulty": "C1",
+    "messages": [
+      {
+        "role": "user",
+        "content": "List exactly 5 prime numbers between 20 and 50. Output ONLY the numbers separated by commas, nothing else."
+      }
+    ],
+    "max_tokens": 64,
+    "exec_test": "with open('output.txt') as f:\n    text = f.read().strip()\nimport re\nnums = [int(x.strip()) for x in re.split(r'[,\\s]+', text) if x.strip().isdigit()]\nprimes_20_50 = {23, 29, 31, 37, 41, 43, 47}\nassert len(nums) == 5, f'Expected 5 numbers, got {len(nums)}: {nums}'\nassert all(n in primes_20_50 for n in nums), f'Non-prime or out of range: {nums}'\nprint('PASS')",
+    "description": "Strict instruction following. Tests format compliance."
+  },
+  {
+    "id": "async_producer_consumer",
+    "category": "algorithm",
+    "difficulty": "C3",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Write a Python async producer-consumer system using asyncio.Queue. Requirements:\n1. `async def producer(queue, items)` - puts items with 0.01s delay between each\n2. `async def consumer(queue, name)` - processes items, prints '{name}: {item}'\n3. `async def main()` - creates 1 producer with 10 items, 3 consumers, runs until all items processed\n4. Consumers should exit gracefully when all items are consumed (use sentinel values)\n\nProvide complete, runnable code."
+      }
+    ],
+    "max_tokens": 768,
+    "exec_test": "import asyncio, sys, io\nfrom solution import main\nold_stdout = sys.stdout\nsys.stdout = captured = io.StringIO()\nasyncio.run(main())\nsys.stdout = old_stdout\noutput = captured.getvalue()\nlines = [l for l in output.strip().split('\\n') if l.strip()]\nassert len(lines) >= 10, f'Expected at least 10 output lines, got {len(lines)}'\n# Check all items 0-9 were processed\nprocessed = set()\nfor line in lines:\n    for i in range(10):\n        if str(i) in line:\n            processed.add(i)\nassert len(processed) == 10, f'Not all items processed: {processed}'\nprint('PASS')",
+    "description": "Async concurrency patterns. Tests correctness under concurrency."
+  },
+  {
+    "id": "type_safe_builder",
+    "category": "design",
+    "difficulty": "C3",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Implement a type-safe query builder in Python that prevents SQL injection. Requirements:\n1. `QueryBuilder` class with fluent interface\n2. Methods: `select(*columns)`, `from_table(name)`, `where(condition, *params)`, `order_by(column, direction='ASC')`, `limit(n)`\n3. `build() -> tuple[str, list]` returns (sql_string, parameters)\n4. Parameters use `?` placeholders\n\nExample:\n```python\nsql, params = (QueryBuilder()\n    .select('name', 'age')\n    .from_table('users')\n    .where('age > ?', 18)\n    .where('active = ?', True)\n    .order_by('name')\n    .limit(10)\n    .build())\n# sql = 'SELECT name, age FROM users WHERE age > ? AND active = ? ORDER BY name ASC LIMIT 10'\n# params = [18, True]\n```"
+      }
+    ],
+    "max_tokens": 768,
+    "exec_test": "from solution import QueryBuilder\nsql, params = (QueryBuilder()\n    .select('name', 'age')\n    .from_table('users')\n    .where('age > ?', 18)\n    .where('active = ?', True)\n    .order_by('name')\n    .limit(10)\n    .build())\nassert 'SELECT name, age' in sql\nassert 'FROM users' in sql\nassert 'WHERE' in sql\nassert 'age > ?' in sql\nassert 'active = ?' in sql\nassert 'ORDER BY name' in sql\nassert 'LIMIT 10' in sql\nassert params == [18, True]\n# Test empty builder\nsql2, params2 = QueryBuilder().select('*').from_table('t').build()\nassert 'SELECT *' in sql2\nassert params2 == []\nprint('PASS')",
+    "description": "API design with fluent interface. Tests design patterns + SQL safety."
+  }
+]

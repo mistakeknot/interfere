@@ -102,6 +102,58 @@ cd interverse/interfer
 uv run pytest tests/ -v
 ```
 
+## Holistic Benchmark (sylveste-2ss)
+
+`benchmarks/holistic_benchmark.py` measures **quality + latency + memory + reliability**
+across configs, not just decode tok/s. Four-stage pipeline:
+
+```bash
+# 1. Generate outputs from each model (slow — runs inference)
+uv run python benchmarks/holistic_benchmark.py generate \
+  --prompts benchmarks/prompts/holistic_eval.json \
+  --output benchmarks/holistic_results/ \
+  --configs 35b,122b,flashmoe-q3,cloud
+
+# 2. Execute generated code in sandbox for pass/fail (fast)
+uv run python benchmarks/holistic_benchmark.py execute \
+  --results benchmarks/holistic_results/
+
+# 3. Score with LLM judge — codex exec (default) or claude -p
+uv run python benchmarks/holistic_benchmark.py judge \
+  --results benchmarks/holistic_results/ --judge codex
+
+# 4. Generate scorecard (markdown table + JSON + TSV)
+uv run python benchmarks/holistic_benchmark.py report \
+  --results benchmarks/holistic_results/
+
+# Or run all stages:
+uv run python benchmarks/holistic_benchmark.py all \
+  --prompts benchmarks/prompts/holistic_eval.json \
+  --output benchmarks/holistic_results/ \
+  --configs 35b,flashmoe-q3,cloud --judge codex
+```
+
+**Available configs** (`list-configs` for full table):
+- `0.5b`, `3b` — small dense models for smoke testing
+- `35b` — Qwen3.5-35B-A3B-4bit (C2 routing tier)
+- `122b` — Qwen3.5-122B-A10B-4bit
+- `flashmoe-q3`, `flashmoe-4bit` — flash-moe 397B variants
+- `deepseek-v3.2`, `glm-5`, `kimi-k2.5` — large MoE models
+- `cloud` — Claude Sonnet via API
+
+The four stages are independently re-runnable. Stage 1 is the expensive part
+(hours of GPU time); stages 2-4 are cheap and can be re-run with improved
+rubrics without regenerating outputs. Results are crash-safe JSONL appended
+one line at a time, so killed runs can resume.
+
+**What it measures beyond tok/s:**
+- `exec_pass_rate`: fraction of code prompts where generated code actually runs
+- `judge_composite`: 0-5 average across correctness, completeness, code quality, instruction following
+- `median_tps`, `p5_tps`, `p95_tps`: throughput distribution, not just median
+- `peak_mem_gb`: actual RAM consumed
+- `thermal_worst`: worst thermal pressure observed
+- `errors`: number of generations that crashed
+
 ## Memory Budget (128GB M5 Max)
 
 ```
