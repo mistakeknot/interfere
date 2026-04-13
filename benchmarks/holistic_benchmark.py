@@ -74,6 +74,7 @@ class GenerationResult:
     thermal_end: str
     timestamp: str
     run: int = 1
+    timed_out: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -216,14 +217,20 @@ CONFIG_REGISTRY: dict[str, dict[str, Any]] = {
 
 
 def _generate_mlx(
-    model_id: str, messages: list[dict], max_tokens: int
+    model_id: str,
+    messages: list[dict],
+    max_tokens: int,
+    timeout: float = 300.0,
 ) -> dict[str, Any]:
-    """Generate with an MLX model via mlx-lm."""
-    import mlx.core as mx
-    from mlx_lm import generate, load
+    """Generate with an MLX model via mlx-lm.
 
-    # Cache model loads across calls (module-level would be cleaner
-    # but this avoids import-time Metal init)
+    Uses stream_generate for token-level timeout support. If the timeout
+    fires mid-generation, returns whatever was produced so far.
+    """
+    import mlx.core as mx
+    from mlx_lm import load, stream_generate
+
+    # Cache model loads across calls
     if not hasattr(_generate_mlx, "_cache"):
         _generate_mlx._cache = {}
 
@@ -246,34 +253,45 @@ def _generate_mlx(
         text = messages[-1]["content"]
 
     mx.metal.reset_peak_memory()
-    tokens_out: list[str] = []
+    chunks: list[str] = []
     ttft = 0.0
+    timed_out = False
 
     t_start = time.monotonic()
-    output = generate(
-        model, tokenizer, prompt=text, max_tokens=max_tokens, verbose=False
-    )
+    for chunk in stream_generate(model, tokenizer, prompt=text, max_tokens=max_tokens):
+        # stream_generate yields dicts with 'text' (or objects with .text)
+        token_text = (
+            chunk.text if hasattr(chunk, "text") else chunk.get("text", str(chunk))
+        )
+        if not chunks:
+            ttft = time.monotonic() - t_start
+        chunks.append(token_text)
+        if time.monotonic() - t_start > timeout:
+            timed_out = True
+            break
     t_end = time.monotonic()
 
     elapsed = t_end - t_start
-    out_tokens = tokenizer.encode(output)
-    n_tokens = len(out_tokens)
+    output = "".join(chunks)
+    n_tokens = len(chunks)
     tps = n_tokens / elapsed if elapsed > 0 else 0.0
-    # TTFT approximation — mlx-lm doesn't expose it
-    ttft_approx = elapsed / max(n_tokens, 1)
 
     return {
         "output_text": output,
         "tokens_generated": n_tokens,
         "elapsed_s": round(elapsed, 3),
-        "ttft_s": round(ttft_approx, 4),
+        "ttft_s": round(ttft, 4),
         "gen_tps": round(tps, 2),
         "peak_mem_gb": round(mx.metal.get_peak_memory() / 1e9, 2),
+        "timed_out": timed_out,
     }
 
 
 def _generate_flashmoe(
-    config: dict, messages: list[dict], max_tokens: int
+    config: dict,
+    messages: list[dict],
+    max_tokens: int,
+    timeout: float = 300.0,
 ) -> dict[str, Any]:
     """Generate with flash-moe binary via FlashMoeWorker."""
     from server.flashmoe_worker import FlashMoeWorker
@@ -314,10 +332,17 @@ def _generate_flashmoe(
         _generate_flashmoe._worker = worker
         _generate_flashmoe._config_key = config_key
 
+    timed_out = False
     t_start = time.monotonic()
-    chunks = list(
-        worker.generate(messages=messages, max_tokens=max_tokens, timeout=600.0)
-    )
+    chunks: list[str] = []
+    # Iterate the generator so we can break on timeout
+    for chunk in worker.generate(
+        messages=messages, max_tokens=max_tokens, timeout=timeout + 30
+    ):
+        chunks.append(chunk)
+        if time.monotonic() - t_start > timeout:
+            timed_out = True
+            break
     t_end = time.monotonic()
 
     elapsed = t_end - t_start
@@ -335,16 +360,20 @@ def _generate_flashmoe(
         "ttft_s": 0,  # not measurable via HTTP proxy
         "gen_tps": round(tps, 2),
         "peak_mem_gb": metrics.get("peak_memory_gb", 0),
+        "timed_out": timed_out,
     }
 
 
 def _generate_cloud(
-    model: str, messages: list[dict], max_tokens: int
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    timeout: float = 300.0,
 ) -> dict[str, Any]:
     """Generate with Claude API."""
     from anthropic import Anthropic
 
-    client = Anthropic()
+    client = Anthropic(timeout=timeout)
 
     # Separate system message if present
     system_msg = None
@@ -396,6 +425,7 @@ def stage_generate(
     output_dir: str,
     configs: list[str],
     runs: int = 1,
+    timeout: float = 300.0,
 ) -> None:
     """Stage 1: Generate outputs from all configs."""
     with open(prompts_path) as f:
@@ -450,18 +480,21 @@ def stage_generate(
                             config["model"],
                             prompt["messages"],
                             prompt.get("max_tokens", 512),
+                            timeout=timeout,
                         )
                     elif config["backend"] == "flash-moe":
                         result = _generate_flashmoe(
                             config,
                             prompt["messages"],
                             prompt.get("max_tokens", 512),
+                            timeout=timeout,
                         )
                     elif config["backend"] == "cloud":
                         result = _generate_cloud(
                             config["model"],
                             prompt["messages"],
                             prompt.get("max_tokens", 512),
+                            timeout=timeout,
                         )
                     else:
                         print(f" unknown backend: {config['backend']}")
@@ -495,16 +528,18 @@ def stage_generate(
                     thermal_end=thermal_end,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     run=run_i,
+                    timed_out=result.get("timed_out", False),
                 )
 
                 # Append to JSONL (crash-safe — one line at a time)
                 with open(results_file, "a") as f:
                     f.write(json.dumps(gen_result.to_dict()) + "\n")
 
+                timeout_tag = " [TIMEOUT]" if result.get("timed_out") else ""
                 print(
                     f" {result['gen_tps']} tok/s, "
                     f"{result['tokens_generated']} tokens, "
-                    f"{result['elapsed_s']}s"
+                    f"{result['elapsed_s']}s{timeout_tag}"
                 )
 
     # Shutdown flash-moe worker if it was started
@@ -1004,8 +1039,9 @@ def stage_report(results_dir: str) -> None:
 
         composite = statistics.mean(judge_avgs.values()) if judge_avgs else 0
 
-        # Error count (generations that start with ERROR:)
+        # Error and timeout counts
         errors = sum(1 for g in config_gens if g["output_text"].startswith("ERROR:"))
+        timeouts = sum(1 for g in config_gens if g.get("timed_out", False))
 
         # Thermal end state — take the worst
         thermals = [g["thermal_end"] for g in config_gens]
@@ -1043,6 +1079,7 @@ def stage_report(results_dir: str) -> None:
             "thermal_worst": thermal_worst,
             # Reliability
             "errors": errors,
+            "timeouts": timeouts,
             "total_prompts": len(config_gens),
         }
         scorecards.append(card)
@@ -1061,8 +1098,8 @@ def stage_report(results_dir: str) -> None:
     header = (
         f"{'Config':<25} {'Exec':>5} {'Judge':>6} "
         f"{'Corr':>5} {'Comp':>5} {'Qual':>5} {'Inst':>5} "
-        f"{'med t/s':>8} {'p5':>6} {'p95':>6} "
-        f"{'Mem GB':>7} {'Therm':>8} {'Err':>4}"
+        f"{'med t/s':>8} {'p5':>6} {'p95':>6} {'TTFT':>6} "
+        f"{'Mem GB':>7} {'Therm':>8} {'Err':>4} {'T/O':>4}"
     )
     print(header)
     print("-" * len(header))
@@ -1078,7 +1115,9 @@ def stage_report(results_dir: str) -> None:
             f"{card['judge_correctness']:>5.2f} {card['judge_completeness']:>5.2f} "
             f"{card['judge_quality']:>5.2f} {card['judge_instruction']:>5.2f} "
             f"{card['median_tps']:>8.1f} {card['p5_tps']:>6.1f} {card['p95_tps']:>6.1f} "
-            f"{card['peak_mem_gb']:>7.1f} {card['thermal_worst']:>8} {card['errors']:>4}"
+            f"{card['median_ttft_s']:>6.3f} "
+            f"{card['peak_mem_gb']:>7.1f} {card['thermal_worst']:>8} "
+            f"{card['errors']:>4} {card['timeouts']:>4}"
         )
 
     print(f"\n  Scorecard saved to {scorecard_file}")
@@ -1142,6 +1181,12 @@ def main(argv: list[str] | None = None) -> None:
     gen_p.add_argument(
         "--runs", type=int, default=1, help="Runs per prompt (default: 1)"
     )
+    gen_p.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="Per-prompt timeout in seconds (default: 300). Partial output is kept.",
+    )
 
     # Execute
     exec_p = sub.add_parser("execute", help="Stage 2: Execute code tests")
@@ -1176,6 +1221,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     all_p.add_argument("--runs", type=int, default=1, help="Runs per prompt")
     all_p.add_argument(
+        "--timeout",
+        type=float,
+        default=300.0,
+        help="Per-prompt timeout in seconds (default: 300)",
+    )
+    all_p.add_argument(
         "--judge",
         choices=["codex", "claude"],
         default="codex",
@@ -1205,7 +1256,9 @@ def main(argv: list[str] | None = None) -> None:
         import shutil
 
         shutil.copy2(args.prompts, out_path / "prompts.json")
-        stage_generate(args.prompts, args.output, configs, args.runs)
+        stage_generate(
+            args.prompts, args.output, configs, args.runs, timeout=args.timeout
+        )
 
     elif args.stage == "execute":
         stage_execute(args.results)
@@ -1227,7 +1280,9 @@ def main(argv: list[str] | None = None) -> None:
         print("\n" + "=" * 60)
         print("  STAGE 1: GENERATE")
         print("=" * 60)
-        stage_generate(args.prompts, args.output, configs, args.runs)
+        stage_generate(
+            args.prompts, args.output, configs, args.runs, timeout=args.timeout
+        )
 
         print("\n" + "=" * 60)
         print("  STAGE 2: EXECUTE")
