@@ -164,6 +164,24 @@ CONFIG_REGISTRY: dict[str, dict[str, Any]] = {
         "label": "Qwen3.5-122B-A10B-4bit",
         "description": "MoE 122B, 10B active — large local model",
     },
+    "27b-3.6": {
+        "backend": "mlx",
+        "model": "mlx-community/Qwen3.6-27B-4bit",
+        "label": "Qwen3.6-27B-4bit",
+        "description": "Qwen3.6 dense 27B (released 2026-04-22) — between 9B and 35B tier",
+    },
+    "35b-3.6": {
+        "backend": "mlx",
+        "model": "mlx-community/Qwen3.6-35B-A3B-4bit",
+        "label": "Qwen3.6-35B-A3B-4bit",
+        "description": "Qwen3.6 MoE 35B/3B-active — drop-in C2 successor to 35b (released 2026-04-16)",
+    },
+    "35b-3.6-dwq": {
+        "backend": "mlx",
+        "model": "mlx-community/Qwen3.6-35B-A3B-4bit-DWQ",
+        "label": "Qwen3.6-35B-A3B-4bit-DWQ",
+        "description": "Qwen3.6 35B/3B-active with DWQ quant — +1-3% expected vs plain 4bit",
+    },
     "flashmoe-q3": {
         "backend": "flash-moe",
         "binary": "~/projects/flash-moe/metal_infer/infer",

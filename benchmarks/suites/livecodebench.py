@@ -124,28 +124,36 @@ def load_problems(limit: int | None = None, dry_run: bool = False) -> list[LCBPr
     if dry_run:
         return [LCBProblem.from_raw(p) for p in DRY_RUN_FIXTURE[: limit or None]]
 
+    # LiveCodeBench publishes the dataset as 6 monolithic JSONL files
+    # (test.jsonl + test2-6.jsonl) and a Python loading script. `datasets>=4.0`
+    # dropped script-based loaders, so we fetch test6.jsonl directly — that
+    # file is the time-segmented v6 release delta (134 MB) and is what makes
+    # v6 contamination-free.
     try:
-        from datasets import load_dataset  # type: ignore
+        from huggingface_hub import hf_hub_download  # type: ignore
     except ImportError as e:
         raise RuntimeError(
-            "No cached dataset at "
-            f"{DATASET_CACHE} and `datasets` not installed. "
-            "Install with `uv pip install datasets` or populate the cache."
+            f"No cached dataset at {DATASET_CACHE} and `huggingface_hub` not "
+            "installed. Install or populate the cache."
         ) from e
 
-    ds = load_dataset(
-        "livecodebench/code_generation_lite",
-        version_tag="release_v6",
-        trust_remote_code=True,
+    print(f"Fetching LCB v6 (test6.jsonl) → {DATASET_CACHE}")
+    src = hf_hub_download(
+        repo_id="livecodebench/code_generation_lite",
+        filename="test6.jsonl",
+        repo_type="dataset",
     )
-    split = ds["test"] if "test" in ds else ds[list(ds.keys())[0]]
 
     DATASET_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    with open(DATASET_CACHE, "w") as f:
-        for row in split:
-            f.write(json.dumps(dict(row)) + "\n")
+    raws: list[dict] = []
+    with open(src) as fin, open(DATASET_CACHE, "w") as fout:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            raws.append(json.loads(line))
+            fout.write(line + "\n")
 
-    raws = list(split)
     problems = [LCBProblem.from_raw(r) for r in raws]
     return problems[:limit] if limit else problems
 
